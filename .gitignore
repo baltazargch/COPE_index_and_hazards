@@ -47,3 +47,11 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+figures/
+
+inputs/
+
+outputs/
+
+Osmia.lignaria/
