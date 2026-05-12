@@ -24,7 +24,7 @@ dir.create("outputs/csv", showWarnings = FALSE)
 # ---- Parameters ----
 set.seed(41546)
 auc_min      <- 0.75                # AUC gate for "good discriminant" models
-pa_sizes     <- c(2000, 4000, 7000, 9467)  # independent PA sizes
+pa_sizes     <- c(2000, 4000, 7000, 10000)  # independent PA sizes
 n_cv_reps    <- 4                   # CV replicates
 cv_perc      <- 0.80                # train proportion per CV
 ncores_small <- 5
@@ -136,7 +136,7 @@ modOL <- BIOMOD_Modeling(
   OPT.strategy  = "bigboss",
   var.import    = 10,
   metric.eval   = c("ROC", "TSS", "KAPPA"),
-  do.full.models= TRUE,                      # build final models on full data
+  # do.full.models= TRUE,                      # build final models on full data
   seed.val      = 123,
   nb.cpu        = n.cores,
   do.progress   = TRUE
@@ -167,11 +167,11 @@ biomod2::bm_PlotEvalBoxplot(modOL)
 
 # Gate by AUC (ROC), then summarise TSS per (algo, PA_size)
 tuning_by_size <- ev_wide %>%
-  filter(!is.na(ROC), ROC >= auc_min) %>%
+  filter(!is.na(AUCroc), AUCroc >= auc_min) %>%
   group_by(algo, PA) %>%
   summarise(
     TSS_median = median(TSS, na.rm = TRUE),
-    ROC_median = median(ROC, na.rm = TRUE),
+    ROC_median = median(AUCroc, na.rm = TRUE),
     KAPPA_median = median(KAPPA, na.rm = TRUE),
     n          = n(),
     .groups    = "drop"
@@ -203,7 +203,7 @@ best_size_by_pa <- tuning_by_size %>%
   arrange(desc(TSS_median), desc(ROC_median), desc(KAPPA_median))
 
 # For reporting too: keep *per-run* records that passed the AUC gate
-readr::write_csv(ev_wide %>% filter(!is.na(ROC), ROC >= auc_min),
+readr::write_csv(ev_wide %>% filter(!is.na(AUCroc), AUCroc >= auc_min),
                  "outputs/csv/tuning_cv_records_auc_gated.csv")
 
 # =====================================================================
@@ -416,16 +416,16 @@ ggsave("figures/fig_sdm_osli_ens_current_NA.png", p_na, width = 8, height = 6, d
 
 # Full per-model CV metrics, gated by AUC, summarised by PA_size & metric
 pa_perf <- ev_df %>%
-  filter(metric.eval %in% c("ROC", "TSS")) %>%
+  filter(metric.eval %in% c("AUCroc", "TSS")) %>%
   select(full.name, PA, run, algo, metric.eval, validation) %>%
   tidyr::pivot_wider(
     id_cols = c(full.name, PA, run, algo),
     names_from = metric.eval, values_from = validation
   ) %>%
-  filter(!is.na(ROC), ROC >= auc_min) %>%
+  filter(!is.na(AUCroc), AUCroc >= auc_min) %>%
   group_by(PA, algo) %>%
   summarise(
-    ROC_median = median(ROC, na.rm = TRUE),
+    ROC_median = median(AUCroc, na.rm = TRUE),
     TSS_median = median(TSS, na.rm = TRUE),
     .groups = "drop"
   ) %>%

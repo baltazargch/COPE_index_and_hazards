@@ -367,7 +367,7 @@ walk(1:nrow(natives), \(r){
     mutate(species = species, .before = metric.eval) %>% 
     distinct() %>% pivot_wider(names_from = metric.eval, values_from = mean_cal)
   
-  readr::write_csv(ens_mean, "outputs/csv/ensemble_eval_means.csv", append = r!=1)
+  readr::write_csv(ens_mean, "outputs/csv/plants_ensemble_eval_means.csv", append = r!=1)
   
   # =====================================================================
   #                      VARIABLE IMPORTANCE (ensemble models)
@@ -507,11 +507,4 @@ walk(1:nrow(natives), \(r){
   readr::write_csv(pa_perf, "outputs/csv/plants_perf_by_PA_size_auc_gated.csv", append = r!=1)
   unlink(bm_ens@sp.name, recursive = T)
   
-  # if(r == nrow(natives)){
-  #   unlink('rerun.txt')
-  # }
-  # 
-  # if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
-  #   rstudioapi::restartSession()
-  # }
 })

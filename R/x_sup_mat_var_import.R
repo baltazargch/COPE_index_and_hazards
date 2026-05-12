@@ -104,8 +104,3 @@ In contrast, other predictors showed lower mean importance and greater variabili
 (sd = {round(mean(var_summary$sd_between_species, na.rm = TRUE),1)}%), suggesting more 
 species-specific responses to environmental conditions.
 ")
-
-res <- read_csv("outputs/final_maxent/csv/final_models_metrics.csv")
-res$bin_path
-res %>% select(!any_of('pred_path', 'model_rds', 'bin_path'))
-colnames(res)
