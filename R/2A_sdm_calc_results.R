@@ -6,7 +6,6 @@ library(tidyverse)
 library(patchwork)
 library(rnaturalearth)
 
-
 # Osmia lignaria model results --------------------------------------------
 
 # General Osmia lignaria models performance results
@@ -77,12 +76,139 @@ rout <- crop(base_osmia, ca, mask=T) %>%
   disagg(fact=8, method='bilinear') %>%
   mask(ca)
 
-writeRaster(rout, 'outputs/ca_baseline_osmia.tif')
+writeRaster(rout, 'outputs/ca_baseline_osmia.tif', overwrite=TRUE)
 
 # prepare Fig 1B - high-emissions only
 
-# Table 1. suitable areas for Osmia lignaria across scenarios
+ssp585_osmia <- rast('outputs/models/projections/means/ssp585_2075-2100_EMmean.tif')
 
+ca_ssp585_osmia <- crop(ssp585_osmia, ca, mask=T)/1000
+
+pct_change <- (ca_ssp585_osmia - crop(base_osmia, ca, mask=T)) / crop(base_osmia, ca, mask=T) *100
+
+writeRaster(disagg(pct_change, fact=8, method='bilinear') %>% mask(ca), 
+            'outputs/pct_change_high_emission_osmia.tif', overwrite=TRUE)
+
+# Table 1. suitable areas for Osmia lignaria across scenarios
+# California area in km2
+ca_area <- as.numeric(st_area(ca)) * 1e-6
+
+# 10th percentile threshold from training occurrences
+cutoff <- terra::extract(
+  rout,
+  occs_osmia %>% select(lon, lat)
+) %>% 
+  select(-ID) %>% 
+  pull(1) %>% 
+  quantile(probs = 0.10, na.rm = TRUE) %>% 
+  as.numeric()
+
+# Baseline suitable area
+baseline_area <- expanse(
+  rout >= cutoff,
+  unit = "km",
+  byValue = TRUE
+) %>% 
+  as_tibble() %>% 
+  filter(value == 1) %>% 
+  pull(area)
+
+# Future rasters
+fut_rast <- rast(list.files(
+  "outputs/models/projections/means/",
+  pattern = "\\.tif$",
+  full.names = TRUE
+))
+
+names(fut_rast) <- sources(fut_rast) %>% 
+  basename() %>% 
+  str_remove("_EMmean\\.tif$")
+
+# If future rasters are scaled by 1000
+fut_rast <- mask(fut_rast, ca) / 1000
+
+# Function to calculate suitable area for one raster layer
+calc_suitable_area <- function(r, cutoff) {
+  expanse(r >= cutoff, unit = "km", byValue = TRUE) %>% 
+    as_tibble() %>% 
+    filter(value == 1) %>% 
+    pull(area)
+}
+
+# Future table
+future_table <- map_dfr(seq_len(nlyr(fut_rast)), \(i) {
+  
+  layer_name <- names(fut_rast)[i]
+  
+  tibble(
+    layer = layer_name,
+    suitable_area_km2 = calc_suitable_area(fut_rast[[i]], cutoff)
+  )
+})
+
+# Parse scenario and period from layer names
+# Modify these regexes if your layer names are different
+future_table <- future_table %>% 
+  mutate(
+    scenario = str_extract(layer, "ssp\\d+|SSP\\d+") %>% str_to_upper(),
+    period = case_when(
+      str_detect(layer, "2015|2044") ~ "2015--2044",
+      str_detect(layer, "2045|2074") ~ "2045--2074",
+      str_detect(layer, "2075|2100") ~ "2075--2100",
+      TRUE ~ NA_character_
+    )
+  ) %>% 
+  mutate(
+    period = factor(
+      period,
+      levels = c("2015--2044", "2045--2074", "2075--2100")
+    )
+  )
+
+# Add baseline row and calculate changes
+table_osmia_area <- bind_rows(
+  tibble(
+    layer = "Baseline",
+    scenario = "Baseline",
+    period = "Baseline",
+    suitable_area_km2 = baseline_area
+  ),
+  future_table
+) %>% 
+  mutate(
+    pct_california = 100 * suitable_area_km2 / ca_area,
+    change_from_baseline_km2 = suitable_area_km2 - baseline_area,
+    pct_change_from_baseline = 100 * (suitable_area_km2 - baseline_area) / baseline_area
+  ) %>% 
+  mutate(
+    across(
+      c(
+        suitable_area_km2,
+        pct_california,
+        change_from_baseline_km2,
+        pct_change_from_baseline
+      ),
+      \(x) round(x, 1)
+    )
+  ) %>% 
+  mutate(
+    unsuitable_area = ca_area - suitable_area_km2, 
+    unsuit_pct_ca = 100 - pct_california,
+  ) %>% 
+  select(
+    scenario,
+    period,
+    suitable_area_km2,
+    pct_california,
+    unsuitable_area,
+    unsuit_pct_ca,
+    change_from_baseline_km2,
+    pct_change_from_baseline,
+    layer
+  ) %>% 
+  arrange(scenario, period)
+
+table_osmia_area
 
 # Floral resources model results ------------------------------------------
 
