@@ -121,7 +121,7 @@ myBiomodData <- BIOMOD_FormatingData(
   expl.var       = spPreds[[sel_vars]],
   PA.nb.rep      = 4,      
   PA.strategy    = "random",
-  PA.nb.absences = c(1000,3000,6000,10000),
+  PA.nb.absences = pa_sizes,
   filter.raster  = FALSE                     # IMPORTANT: we already deduplicated
 )
 
@@ -163,7 +163,7 @@ ev_wide <- ev_df %>%
     values_fill= NA_real_
   )
 
-biomod2::bm_PlotEvalBoxplot(modOL)
+# biomod2::bm_PlotEvalBoxplot(modOL)
 
 # Gate by AUC (ROC), then summarise TSS per (algo, PA_size)
 tuning_by_size <- ev_wide %>%
@@ -178,10 +178,10 @@ tuning_by_size <- ev_wide %>%
   ) %>%
   mutate(
     PA = case_when(
-      PA == 'PA1' ~ 1000,
-      PA == 'PA2' ~ 3000,
-      PA == 'PA3' ~ 6000,
-      PA == 'PA4' ~ 10000, 
+      PA == 'PA1' ~ pa_sizes[1],
+      PA == 'PA2' ~ pa_sizes[2],
+      PA == 'PA3' ~ pa_sizes[3],
+      PA == 'PA4' ~ pa_sizes[4], 
       .default =  NA
     )
   ) %>% 
