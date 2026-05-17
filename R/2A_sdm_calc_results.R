@@ -1,6 +1,8 @@
 # libraries
 library(sf)
 library(terra)
+library(furrr)
+library(ggridges)
 library(tidyterra)
 library(tidyverse)
 library(patchwork)
@@ -85,6 +87,8 @@ ssp585_osmia <- rast('outputs/models/projections/means/ssp585_2075-2100_EMmean.t
 ca_ssp585_osmia <- crop(ssp585_osmia, ca, mask=T)/1000
 
 pct_change <- (ca_ssp585_osmia - crop(base_osmia, ca, mask=T)) / crop(base_osmia, ca, mask=T) *100
+
+range(pct_change)
 
 writeRaster(disagg(pct_change, fact=8, method='bilinear') %>% mask(ca), 
             'outputs/pct_change_high_emission_osmia.tif', overwrite=TRUE)
@@ -210,10 +214,208 @@ table_osmia_area <- bind_rows(
 
 table_osmia_area
 
+# Fig 1C. frequency plots
+
+baseline <- crop(base_osmia, ca, mask=T)
+ssp245 <- fut_rast$`ssp245_2075-2100` %>% crop(ca, mask=T)
+ssp585 <- fut_rast$`ssp585_2075-2100`%>% crop(ca, mask=T)
+
+
+# Function to make a darker, matte version of viridis-H
+viridis_matte <- function(n = 256,
+                          option = "H",
+                          desat_amount = 0.4,   # 0 = no change, 1 = fully gray
+                          darken_amount = 0.2) {# 0 = no change, 1 = black
+  # 1) base viridis palette
+  pal <- viridisLite::viridis(n, option = option, direction = -1)
+  
+  # 2) reduce saturation (chroma)
+  pal <- colorspace::desaturate(pal, amount = desat_amount)
+  
+  # 3) darken (reduce luminance/value)
+  pal <- colorspace::darken(pal, amount = darken_amount)
+  
+  pal
+}
+
+
+dats <- 
+  tibble(
+    baseline = values(baseline, na.rm=T)[,1] %>% unname(), 
+ 
+    ssp245_2100 = values(ssp245, na.rm=T)[,1] %>% unname(),
+
+    ssp585_2100 = values(ssp585, na.rm=T)[,1] %>% unname()
+  ) %>% pivot_longer(
+    cols = everything()
+  ) %>% 
+  mutate(Scenario = factor(name, 
+                           levels= c(
+                             'ssp585_2100',
+                             'ssp245_2100',
+                             'baseline'
+                           )))
+
+ggplot(dats, aes(x = value, y = Scenario, fill = after_stat(x))) +
+  geom_density_ridges_gradient(scale = 1.2, linewidth = 0.1, rel_min_height = 0.005) +
+  scale_fill_gradientn(
+    colours = c('#d7191c','#fdae61', '#ffffbf', '#abdda4', '#2b83ba') ) +
+  scale_x_continuous(
+    breaks = seq(0, 1, by=.2)
+  )+
+  labs(x = 'Suitability') +
+  scale_y_discrete(labels = c('High emissions \n(2075-2100)',
+                              'Low emissions \n(2075-2100)',
+                              'Baseline'), expand = c(-1.1, 0)) +
+  theme_light(base_size = 18) +
+  theme(
+    legend.position="none"
+  )
+
+ggsave('outputs/density_suit_draft.png', dpi=600)  
+ggsave('outputs/density_suit_draft.svg', dpi=600)  
+
 # Floral resources model results ------------------------------------------
 
 # General stats for floral resources models
+# Load plant list
+plant_list <- read_csv('outputs/records/all_species_records_and_native.csv')
+natives <- plant_list %>% filter(`CA Native` == 'yes')
+
+# load evaluation metrics
+evals <- read_csv("outputs/csv/plants_ensemble_eval.csv") %>% 
+  mutate(
+    species = str_remove(full.name, "_.*") %>% 
+      str_replace_all("\\.", "_"),
+    .before = 1
+  )
+
+# species modeled
+evals %>% pull(species) %>% n_distinct() #out of 71
+
+# total species
+natives %>% nrow()
+
+read_csv('outputs/csv/plants_perf_by_PA_size_auc_gated.csv') %>% 
+  group_by(PA) %>% 
+  summarise(AUC = mean(ROC_median)) #PA4 10,000 AUC 0.864
+
+evals %>% 
+  filter(filtered.by == 'ROC') %>% 
+  filter(metric.eval=='ROC') %>% 
+  pull(calibration) %>% summary()
+  
+evals %>% 
+  filter(filtered.by == 'TSS') %>% 
+  filter(metric.eval=='TSS') %>% 
+  pull(calibration) %>% summary()
+
+#Load occs
+fls_occs <- list.files('outputs/records/plants', '.csv', full.names = T)
+
+#append to database
+natives$path <- sapply(natives$species, \(x) fls_occs[grep(str_replace(x, ' ', '_'), fls_occs)], 
+                       simplify = T) %>% unname()
+natives$sp <- natives$species %>% str_to_lower() %>% str_replace(' ', '_')
+
+# read projection table
+csv_mods <- read_csv("outputs/models/plants_projection_table.csv") %>% 
+  mutate(
+    dir_path = str_remove(path, basename(path)), 
+    binary_file = path %>% basename() %>% sub("^([^_]+)_(.+\\.tif)$", "\\1_TSSbinay_\\2", .) %>% str_c(dir_path, .), 
+    exists = file.exists(binary_file),
+    current_file = paste0("outputs/models/", species, "_NA_cur_ensemble.tif")
+  ) %>% 
+  left_join(evals, by = "species") %>% 
+  left_join(natives %>% select(species= sp, occs_path=path), 
+            by = 'species') %>% 
+  filter(species != 'plagiobothrys_lithocaryus') # endemic outlier
 
 # Baseline and future richness patterns
+plan(multisession, workers=8)
+plants_bin_10th <- future_map(csv_mods$species, \(x){
+  
+  sp_db <- csv_mods %>% filter(species == x)
 
+  baseline_map <- rast(sp_db$current_file) %>% mean()/1000
+
+  occs_sp <- read_csv(sp_db$occs_path)
+  
+  p10_cutoff <- terra::extract(
+    baseline_map,
+    occs_sp %>% select(decimalLongitude, decimalLatitude)
+  ) %>% 
+    select(-ID) %>% 
+    pull(1) %>% 
+    quantile(probs = 0.10, na.rm = TRUE) %>% 
+    as.numeric()
+    
+  ca_plant_baseline <- baseline_map %>% crop(ca, mask=T)
+  
+  bin_map <- ca_plant_baseline >= cutoff
+  
+  return(
+    list(
+      species = x, 
+      ca_baseline = ca_plant_baseline, 
+      ca_binary = bin_map
+    )
+    )  
+  })
+
+plan(sequential)
+
+
+# Fig 1F frequency plants
+#base layer to extend when plants are not in whole California
+r <-  rast("figures/plants_all_future_rich_raw.tif") %>% 
+  crop(ca, mask=T)
+
+wrld <- wrld_org %>% 
+  st_crop(extend(ext(r), 0.5))
+
+wrldp <- st_transform(wrld, crs=4269)
+
+curr <- rast('figures/plants_current_richness.tif') %>% resample(r[[1]])
+
+currM <- mask(curr, r[[1]])
+names(r)
+dats <- 
+  tibble(
+    current = values(currM, na.rm=T)[,1] %>% unname(), 
+    # ssp245_2044 = values(r[[1]], na.rm=T)[,1] %>% unname(),
+    # ssp245_2074 = values(r[[2]], na.rm=T)[,1] %>% unname(),
+    ssp245_2100 = values(r[[7]], na.rm=T)[,1] %>% unname(),
+    
+    # ssp585_2044 = values(r[[7]], na.rm=T)[,1] %>% unname(),
+    # ssp585_2074 = values(r[[8]], na.rm=T)[,1] %>% unname(),
+    ssp585_2100 = values(r[[9]], na.rm=T)[,1] %>% unname()
+  ) %>% pivot_longer(
+    cols = everything()
+  ) %>% 
+  mutate(Scenario = factor(name, 
+                           levels= c(
+                             # 'ssp245_2044', 
+                             # 'ssp245_2074', 
+                             'ssp585_2100',
+                             'ssp245_2100',
+                             'current'
+                             # 'ssp585_2044', 
+                             # 'ssp585_2074', 
+                           )))
+
+ggplot(dats, aes(x = value, y = Scenario, fill = ..x..)) +
+  geom_density_ridges_gradient(scale = 1, linewidth = 0.1,
+                               rel_min_height = 0.005) +
+  scale_fill_gradientn(
+    colours = viridis_matte(256,option = 'D', desat_amount = 0.15, darken_amount = .1),
+  ) +
+  # ylim(NA, 'current')+
+  labs(x = 'Richness') +
+  theme_light(base_size = 14) +
+  scale_y_discrete(expand = c(0, 0)) +
+  theme(legend.position="none")
+
+ggsave('figures/plant_density_suit_draft.png', dpi=600)  
+ggsave('figures/plant_density_suit_draft.svg', dpi=600)  
 
