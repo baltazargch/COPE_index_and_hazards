@@ -445,6 +445,10 @@ plan(sequential)
 
 ssp585_floral_richn <- map(ssp_585_plants_bin_10th, unwrap) %>% rast() %>% sum(na.rm = T) 
 
+#To plot in QGIS
+writeRaster(ssp585_floral_richn, 'outputs/2100_ssp585_floral_floral_richness.tif', overwrite=T)
+
+
 floral_pct_change <- ((ssp585_floral_richn - (baseline_floral_rich+1))/(baseline_floral_rich+1)) * 100
 
 # number of species changes
