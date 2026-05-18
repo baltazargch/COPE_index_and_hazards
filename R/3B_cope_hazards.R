@@ -4,53 +4,19 @@ library(networkD3)
 
 
 # helper functions -------------------------------------------------------
-scop_idx <- function(S, Rc, Rf, 
-                     delta = 1, 
-                     kappa = 0.5){
+cope_index <- function(sf, rf, rc, k, v = 0.5, delta = 1, h = 3){
   
-  # ---DEBUGG PARAMETERS TO TUNE ---
-  # delta    <- 1        # pseudo-count species change
-  # kappa    <- 2      # >1 sharpens tanh contrast
   
-  upsilon = 0.5 #this is to center multiplicative weight not user accesible
+  g_rc <- rc / (rc + h)
   
-  all_rasters <- list(S, Rc, Rf)
-  stopifnot(
-    all(map_lgl(all_rasters, ~class(.x)[1] == 'SpatRaster')), #all all rasters
-    isTRUE(min(S[], na.rm=T) >= 0 && max(S[], na.rm = T) <= 1), #suitability is cloglog
-    all(map_lgl(all_rasters[2:3], ~ isTRUE(min(.x[], na.rm=T) >= 0))) #richness is not negative
-  )
+  wr <- 1 + v * g_rc * tanh(k * log((rf + delta)/(rc + delta)))
   
-  # --- align rasters to a common template (pick one) ---
-  ref <- S
-  
-  rc  <- project(Rc, ref, method='near') #these are species counts
-  rf  <- project(Rf, ref, method='near') #these are species counts
-  
-  sf  <- project(S, ref, method='bilinear') #these are suitability values
-  
-  drp <- (rf +  delta) / ( rc + delta)
-  
-  log_r <- log(drp)
-  
-  # Sharpen drp via kappa and make response bounded to [-1, 1]
-  dstar <- tanh(kappa*log_r)
-  
-  # Calculate the multiplicative w and center at 1
-  w <-  1 + upsilon * (rc / (rc + 5)) * dstar
-  
-  #debugging
-  # plot(w)
-  
-  # element-wise multiply and clamp to 1
-  scop <- sf * w
-  names(scop) <- 'SCOP_index'
-  
-  return(scop)
+  cope <- sf * wr
+  return(cope)
 }
 
 # helper: 4 quantiles (0–3)
-scop_to_quants <- function(scop_r) {
+cope_to_quants <- function(scop_r) {
   q <- quantile(scop_r[], na.rm = TRUE, probs = c(0, .25, .5, .75, 1))
   classify(
     scop_r,
@@ -137,8 +103,7 @@ cat_labels_binary <- function() {
     mutate(label = paste(hazard_bin, scop_q, sep = ": "))
 }
 
-
-# cell.sizes <- cellSize(scop_ssps[[1]], unit="km")
+# cell.sizes <- cellSize(cope_ssps[[1]], unit="km")
 
 transition_area <- function(cat_from, cat_to, area_r) {
   inter <- cat_from * 100 + cat_to
@@ -159,14 +124,14 @@ transition_area <- function(cat_from, cat_to, area_r) {
 
 
 make_sankey_df <- function(scop_list, area_r, periods = c("early","mid","late")) {
-  # scop_list = scop_ssps
+  # scop_list = cope_ssps
   # haz_bin_list = haz_bin
   # area_r = cell.sizes
   # periods = periods
   
   # 1) quantile class + combined category per period
   cats <- map2(periods,list(ca), \(p, c) {
-    q <- scop_to_quants(scop_list[[p]])
+    q <- cope_to_quants(scop_list[[p]])
     h <- haz_bin_from_targets(q, ca, p)
     vh <- values(h)
     
@@ -210,7 +175,6 @@ make_sankey_df <- function(scop_list, area_r, periods = c("early","mid","late"))
 }
 
 
-
 # Load data and run -------------------------------------------------------
 
 ## calc scop_list ----------------------------------------------------------
@@ -218,36 +182,64 @@ ca <- rnaturaleplotca <- rnaturalearth::ne_states('United States of America')
 ca <- ca %>% filter(name == 'California')
 
 #this is current richness. Immutable
-Rc <- rast('outputs/current_native_plant_richness_TSS.tif')
+rc <- rast('outputs/baseline_floral_richness.tif') 
 
 #files for future suitability
-S <- rast("figures/osli_all_means.tif")
+sf <- rast(list.files("outputs/models/projections/means/", 'ssp585_', full.names = T )) %>% 
+  crop(ca, mask=T)/1000
 
-S <- S[[str_detect(names(S) , 'ssp585')]] %>% as.list()
+#Calculate future richness
+csv_mods <- read_csv('outputs/database_floral_models_10p_th.csv')
 
-#files for future richness
-Rf_files <- c(
-  'outputs/models/richness/species_rich_count_ssp585_2015-2044.tif', 
-  'outputs/models/richness/species_rich_count_ssp585_2045-2074.tif', 
-  'outputs/models/richness/species_rich_count_ssp585_2075-2100.tif' 
+periods <- csv_mods$period %>% unique()
+
+names(sf) <- periods
+
+rf_all <- map(periods, \(p){
+  # p=periods[1] #debug
+  
+  # future richness patterns for period
+  ssp585_p_plants <- csv_mods %>% 
+    filter(ssp=='ssp585', period == p) %>% 
+    distinct(species, path) %>% 
+    left_join(
+      plants_bin_10th %>% map_dfr(\(x) tibble(species = x$species, cutoff = x$cutoff)), by='species'
+    )
+  
+  plan(multisession, workers=18)
+  p_rast <- future_map(unique(ssp585_p_plants$species), \(x){
+    # x=ssp585_plants$species[1]
+    sp_db <- ssp585_p_plants %>% filter(species == x) 
+    
+    high_emissions_map <- (rast(sp_db$path) %>% mean()/1000) %>% crop(ca, mask=T)
+    
+    ca_high_emissions_bin <- high_emissions_map >= sp_db$cutoff[1]
+    wrap(ca_high_emissions_bin)
+  })
+  
+  plan(sequential)
+  
+  period_richn <- map(p_rast, unwrap) %>% rast() %>% sum(na.rm = T) 
+  names(period_richn) <- p
+  period_richn
+})
+
+rf_all <- rast(rf_all)
+
+
+cope_ssps <-  c(
+  early = cope_index(sf[[1]], rf_all[[1]], rc, k = 0.5, v = 0.5, delta = 1, h = 3),
+  mid = cope_index(sf[[2]], rf_all[[2]], rc, k = 0.5, v = 0.5, delta = 1, h = 3),
+  late = cope_index(sf[[3]], rf_all[[3]], rc, k = 0.5, v = 0.5, delta = 1, h = 3)
 )
+       
 
-scop_ssps <- pmap(list(x = S, y = Rc, z = Rf_files), 
-                  \(x, y, z) {
-                    S = x
-                    Rf = rast(z) %>% crop(ca, mask=T)
-                    Rc = y
-                    
-                    scop_r <- scop_idx(S, Rc, Rf)
-                    scop_r
-                  })
-
-names(scop_ssps) <- c('early', 'mid', 'late')
+names(cope_ssps) <- c('early', 'mid', 'late')
 
 # debugging
-# map(scop_ssps, plot)
+# map(cope_ssps, plot)
 
-cell.sizes <- cellSize(scop_ssps[[1]], unit='km')
+cell.sizes <- cellSize(cope_ssps[[1]], unit='km')
 ## hazards -----------------------------------------------------------------
 periods <- c('early', 'mid', 'late')
 
@@ -255,14 +247,12 @@ cats <- map2(periods,list(ca), \(p, c) {
   # p <- periods[1]
   # c = ca
   # 
-  q <- scop_to_quants(scop_ssps[[p]])
+  q <- cope_to_quants(cope_ssps[[p]])
   vh <- values(q)
   
   vh[ vh == 0 ] <- NA
   values(q) <- vh
-  # plot(scop_ssps[[1]])
-  # plot(q)
-  
+
   h <- haz_bin_from_targets(q, c, p)
   
   cat <- build_category(q, h) 
@@ -281,16 +271,14 @@ map(1:3, \(i){
               prop = area/sum(areas.haz$area) * 100)
   
 })
+
 ### fires -------------------------------------------------------------------
-
-
 # sanity check
 # plot(target.fires)
 # plot(target.hw)
 
-plot(scop_ssps$early)
 
-sank <- make_sankey_df(scop_ssps, cell.sizes, periods)
+sank <- make_sankey_df(cope_ssps, cell.sizes, periods)
 
 
 nodes_filt <- sank$nodes %>%
@@ -318,7 +306,7 @@ d3.scaleOrdinal()
 '
 library(htmlwidgets)
 
-
+# to make sanky in web sankey page
 map_chr(1:nrow(links_filt), \(x) {
   paste0(
     nodes_filt$name[ nodes_filt$new_id == links_filt$source[x] ], 
@@ -342,16 +330,15 @@ p <- networkD3::sankeyNetwork(
   nodeWidth = 30
 )
 p
+
 library(webshot2)
 
-saveWidget(p, "sankey.html", selfcontained = TRUE)
+saveWidget(p, "outputs/sankey.html", selfcontained = TRUE)
 
 # Try SVG (may work depending on setup)
-webshot("sankey.html", file = "sankey.pdf", selector = "svg")
+webshot("outputs/sankey.html", file = "sankey.pdf", selector = "svg")
 
 # Report results ----------------------------------------------------------
-
-
 node_meta <- nodes_filt %>%
   separate(
     name,
@@ -412,7 +399,7 @@ hazard_effect <- flows %>%
 
 haz_bin_list <- set_names(
   map(periods, \(.x) {
-    h <- haz_bin_from_targets(scope = scop_ssps[[.x]], ca = ca, period = .x)
+    h <- haz_bin_from_targets(scope = cope_ssps[[.x]], ca = ca, period = .x)
     vh <- values(h)
     
     vh[ is.na(vh) ] <- 0
@@ -423,7 +410,7 @@ haz_bin_list <- set_names(
 )
 
 # area per cell (km^2), using any template that matches your SCOP grid
-area_km2_r <- cellSize(scop_ssps[[1]], unit = "km")
+area_km2_r <- cellSize(cope_ssps[[1]], unit = "km")
 
 haz_areas <- imap_dfr(haz_bin_list, \(h, p) {
   # make sure grids align
@@ -454,18 +441,13 @@ haz_areas_pct <- haz_areas %>%
 haz_areas_pct %>% 
   filter(period == 'late')
 
-haz_areas_pct %>%
-  ggplot(aes(x = period, y = pct, fill = exposure)) +
-  geom_col(position = "stack") +
-  labs(x = NULL, y = "Area (%)", fill = NULL)
-
 periods <- c("early", "mid", "late")
 
 make_combined_map <- function(period) {
-  scop_q <- scop_to_quants(scop_ssps[[period]]) |> crop(ca, mask = TRUE)
+  scop_q <- cope_to_quants(cope_ssps[[period]]) |> crop(ca, mask = TRUE)
   scop_q[scop_q == 0] <- NA
   
-  haz <- haz_bin_from_targets(scope = scop_ssps[[period]], ca = ca, period = period)
+  haz <- haz_bin_from_targets(scope = cope_ssps[[period]], ca = ca, period = period)
   haz <- project(haz, scop_q, method = "near")
   
   vh <- values(haz)
@@ -479,6 +461,7 @@ make_combined_map <- function(period) {
   names(comb) <- period
   comb
 }
+
 class_levels <- c(
   "1"  = "No hazard: Low",
   "2"  = "No hazard: Mid",
@@ -487,6 +470,7 @@ class_levels <- c(
   "12" = "Hazard: Mid",
   "13" = "Hazard: High"
 )
+
 comb_stack <- rast(map(periods, make_combined_map))
 names(comb_stack) <- periods
 
@@ -498,8 +482,13 @@ comb_stack <- crop(comb_stack, ca, mask=T)
 
 plot(comb_stack)
 
-writeRaster(comb_stack, 'scop_x_hazards.tif', overwrite=TRUE)
-imap(scop_ssps,\(x,n) writeRaster(x, paste0(n, '_scop.tif'), overwrite=TRUE))
+writeRaster(comb_stack %>% 
+              disagg(fact=8, method='near') %>%
+              mask(ca), 'outputs/cope_x_hazards.tif', overwrite=TRUE)
+
+imap(cope_ssps,\(x,n) writeRaster(x%>% 
+                                    disagg(fact=8, method='near') %>%
+                                    mask(ca), paste0('outputs/', n, '_cope.tif'), overwrite=TRUE))
 
 df_map <- as.data.frame(comb_stack, xy = TRUE, na.rm = TRUE) %>%
   pivot_longer(cols = all_of(periods), names_to = "period", values_to = "class") %>%

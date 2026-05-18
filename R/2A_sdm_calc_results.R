@@ -420,6 +420,11 @@ ggplot() +
 writeRaster(baseline_floral_rich, 'outputs/baseline_floral_richness.tif', overwrite=T)
 
 
+csv_mods %>% 
+  left_join(
+    plants_bin_10th %>% map_dfr(\(x) tibble(species = x$species, cutoff = x$cutoff)), by='species'
+  ) %>% write_csv('outputs/database_floral_models_10p_th.csv')
+
 # Fig1E percentage change to high-emission scenario
 # Baseline and future richness patterns
 ssp585_plants <- csv_mods %>% 
@@ -447,6 +452,7 @@ ssp585_floral_richn <- map(ssp_585_plants_bin_10th, unwrap) %>% rast() %>% sum(n
 
 #To plot in QGIS
 writeRaster(ssp585_floral_richn, 'outputs/2100_ssp585_floral_floral_richness.tif', overwrite=T)
+
 
 
 floral_pct_change <- ((ssp585_floral_richn - (baseline_floral_rich+1))/(baseline_floral_rich+1)) * 100
