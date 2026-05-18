@@ -155,6 +155,7 @@ calc_future_area <- function(future_path, cutoff, polygon_sf = ca) {
 }
 
 areas_models <- csv_mods %>% 
+  select(!cutoff) %>% 
   left_join(baseline_info, by = "species") %>% 
   mutate(
     future_area_km2 = map2_dbl(
@@ -209,37 +210,6 @@ period_summary <- area_change_plot %>%
     .groups = "drop"
   )
 
-ggplot(period_summary, aes(x = mean_change, y = period, 
-                           colour = ssp, group=ssp)) +
-  geom_vline(xintercept = 0, linewidth = 0.4, linetype = "dashed") +
-  geom_errorbarh(
-    aes(xmin = ci_low, xmax = ci_high),
-    height = 0.18,
-    linewidth = 0.7
-  ) +
-  geom_point(size = 3) +
-  labs(
-    x = "Mean change in suitable area relative to current (%)",
-    y = NULL
-  ) +
-  theme_classic(base_size = 13)
-
-area_change_class <- areas_models %>% 
-  filter(species != 'plagiobothrys_lithocaryus') %>% 
-  mutate(
-    period = factor(
-      period,
-      levels = c("2015-2044", "2045-2074", "2075-2100")
-    ),
-    change_class = case_when(
-      area_change_pct < 0 ~ "Loss",
-      area_change_pct > 0 ~ "Gain",
-      area_change_pct == 0 ~ "Stable",
-      TRUE ~ NA_character_
-    )
-  ) %>% 
-  filter(!is.na(period), !is.na(ssp), !is.na(change_class))
-
 
 bin_breaks <- c(-Inf,-75,-50,-25,-10,10,25,50,75, Inf)
 bin_labels <- c("≤ -75%","-75% to -50%","-50% to -25%","-25% to -10%",
@@ -258,14 +228,14 @@ prep_counts <- function(df, col){
 
 low_2100 <- areas_models %>%
   filter(species != 'plagiobothrys_lithocaryus') %>% 
-  filter(ssp == 'ssp245') %>% 
-  select(area_change_pct) %>% 
+  filter(ssp == 'ssp245', period == '2075-2100') %>% 
+  select(species, gcm, period, area_change_pct) %>% 
   prep_counts('area_change_pct')
 
 high_2100 <- areas_models %>%
   filter(species != 'plagiobothrys_lithocaryus') %>% 
-  filter(ssp == 'ssp585') %>% 
-  select(area_change_pct) %>% 
+  filter(ssp == 'ssp585', period == '2075-2100') %>% 
+  select(species, gcm, period, area_change_pct) %>% 
   prep_counts('area_change_pct')
 
 
@@ -373,33 +343,6 @@ ggsave(filename = 'figures/whole_win_los.png',
        dpi=600,
        width = 9, height = 8, scale=1.5, units = 'cm')
 
-area_change_plot %>% 
-  mutate(case = 
-           ifelse(area_change_pct < -10, 'Loss', 
-                  ifelse(area_change_pct > 10, 'Gain', 'No Change'))) %>% 
-  mutate(case = factor(case, levels = c('Loss', 'No Change', 'Gain'))) %>% 
-  filter(area_change_pct < 1000) %>% 
-  ggplot(aes(x = period, y = area_change_pct)) +
-  geom_hline(yintercept = 0, linewidth = 0.4, linetype = "dashed") +
-  geom_jitter(
-    aes(shape = ssp, colour=case),
-    width = 0.12,
-    alpha = 0.55,
-    size = 1.8
-  ) +
-  geom_violin(
-    width = 0.55,
-    outlier.shape = NA,
-    alpha = 0
-  ) +
-  scale_colour_manual(values=c('#B2182B', '#E6C85C', '#4DAF4A'))+
-  labs(
-    x = NULL,
-    y = "Change in suitable area relative to current (%)"
-  ) +
-  envalysis::theme_publish() +
-  theme(legend.position = 'bottom')
-
 evals <- read_csv("outputs/csv/plants_ensemble_eval.csv")
 
 glimpse(evals)
@@ -431,8 +374,9 @@ evals_clean %>%
   write_csv('outputs/summarise_metrics_eval_plants.csv')
 
 write_csv(evals_clean, 'outputs/sup_mat_eval_metrics_plants.csv')
+
 evals_wide <- evals_clean %>% 
-  group_by(species, ensemble_filter, metric.eval) %>% 
+  group_by(species, metric.eval) %>% 
   summarise(
     cutoff = mean(cutoff, na.rm = TRUE),
     sensitivity = mean(sensitivity, na.rm = TRUE),
@@ -448,8 +392,7 @@ evals_wide <- evals_clean %>%
 
 supp_long_table <- areas_models %>% 
   rename(
-    tss_cutoff_joined = cutoff.x,
-    p10_cutoff = cutoff.y
+    p10_cutoff = cutoff
   ) %>% 
   left_join(evals_wide, by = "species") %>% 
   mutate(
@@ -470,8 +413,6 @@ supp_long_table <- areas_models %>%
     area_change_pct,
     change_class_10pct,
     p10_cutoff,
-    tss_cutoff_joined,
-    ensemble_filter,
     everything(),
     -path,
     -dir_path,
@@ -479,8 +420,6 @@ supp_long_table <- areas_models %>%
     -exists,
     -current_file,
     -occs_path,
-    -tss_cutoff_joined, 
-    -ensemble_filter,
     -kappa_cutoff,
     -roc_cutoff, -aucroc_cutoff, -aucroc_calibration,
     -kappa_sensitivity, -aucroc_specificity,

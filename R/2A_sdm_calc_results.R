@@ -329,13 +329,18 @@ csv_mods <- read_csv("outputs/models/plants_projection_table.csv") %>%
   left_join(evals, by = "species") %>% 
   left_join(natives %>% select(species= sp, occs_path=path), 
             by = 'species') %>% 
+  mutate(occs_path = ifelse(is.na(occs_path), "outputs/records/plants/Arctostaphylos_uva-ursi.csv", 
+                            occs_path)) %>% 
   filter(species != 'plagiobothrys_lithocaryus') # endemic outlier
 
 # Baseline and future richness patterns
-plan(multisession, workers=8)
-plants_bin_10th <- future_map(csv_mods$species, \(x){
+baseline_plants <- csv_mods %>% 
+  distinct(species, current_file, occs_path) 
+
+plan(multisession, workers=18)
+plants_bin_10th <- future_map(baseline_plants$species, \(x){
   
-  sp_db <- csv_mods %>% filter(species == x)
+  sp_db <- baseline_plants %>% filter(species == x) 
 
   baseline_map <- rast(sp_db$current_file) %>% mean()/1000
 
@@ -352,13 +357,14 @@ plants_bin_10th <- future_map(csv_mods$species, \(x){
     
   ca_plant_baseline <- baseline_map %>% crop(ca, mask=T)
   
-  bin_map <- ca_plant_baseline >= cutoff
-  
+  bin_map <- ca_plant_baseline >= p10_cutoff
+  # gc()
   return(
     list(
       species = x, 
-      ca_baseline = ca_plant_baseline, 
-      ca_binary = bin_map
+      cutoff = p10_cutoff,
+      ca_baseline = wrap(ca_plant_baseline), 
+      ca_binary = wrap(bin_map)
     )
     )  
   })
@@ -366,42 +372,140 @@ plants_bin_10th <- future_map(csv_mods$species, \(x){
 plan(sequential)
 
 
+plan(multisession, workers=18)
+plants_bin_10th <- future_map(baseline_plants$species, \(x){
+  
+  sp_db <- baseline_plants %>% filter(species == x) 
+  
+  baseline_map <- rast(sp_db$current_file) %>% mean()/1000
+  
+  occs_sp <- read_csv(sp_db$occs_path)
+  
+  p10_cutoff <- terra::extract(
+    baseline_map,
+    occs_sp %>% select(decimalLongitude, decimalLatitude)
+  ) %>% 
+    select(-ID) %>% 
+    pull(1) %>% 
+    quantile(probs = 0.10, na.rm = TRUE) %>% 
+    as.numeric()
+  
+  ca_plant_baseline <- baseline_map %>% crop(ca, mask=T)
+  
+  bin_map <- ca_plant_baseline >= p10_cutoff
+  # gc()
+  return(
+    list(
+      species = x, 
+      cutoff = p10_cutoff,
+      ca_baseline = wrap(ca_plant_baseline), 
+      ca_binary = wrap(bin_map)
+    )
+  )  
+})
+
+plan(sequential)
+# Fig1D California baseline floral resource richness for Osmia lignaria
+baseline_floral_rich <- plants_bin_10th %>% map(\(x) unwrap(x$ca_binary) %>% project(ca_ssp585_osmia))
+
+baseline_floral_rich <- baseline_floral_rich %>% rast() %>% sum(na.rm = T)
+
+# simple representation Fig 1D
+ggplot() + 
+  geom_spatraster(data = baseline_floral_rich) + 
+  scale_fill_viridis_c(option='D', direction = -1, na.value = NA, alpha = 0.8) + 
+  theme_minimal()
+
+#To plot in QGIS
+writeRaster(baseline_floral_rich, 'outputs/baseline_floral_richness.tif', overwrite=T)
+
+
+# Fig1E percentage change to high-emission scenario
+# Baseline and future richness patterns
+ssp585_plants <- csv_mods %>% 
+  filter(ssp=='ssp585', period == '2075-2100') %>% 
+  distinct(species, path) %>% 
+  left_join(
+    plants_bin_10th %>% map_dfr(\(x) tibble(species = x$species, cutoff = x$cutoff)), by='species'
+  )
+
+
+plan(multisession, workers=18)
+ssp_585_plants_bin_10th <- future_map(unique(ssp585_plants$species), \(x){
+  # x=ssp585_plants$species[1]
+  sp_db <- ssp585_plants %>% filter(species == x) 
+  
+  high_emissions_map <- (rast(sp_db$path) %>% mean()/1000) %>% crop(ca, mask=T)
+  
+  ca_high_emissions_bin <- high_emissions_map >= sp_db$cutoff[1]
+  wrap(ca_high_emissions_bin)
+})
+
+plan(sequential)
+
+ssp585_floral_richn <- map(ssp_585_plants_bin_10th, unwrap) %>% rast() %>% sum(na.rm = T) 
+
+floral_pct_change <- ((ssp585_floral_richn - (baseline_floral_rich+1))/(baseline_floral_rich+1)) * 100
+
+# number of species changes
+ggplot() + 
+  geom_spatraster(data = (ssp585_floral_richn - baseline_floral_rich)) + 
+  scale_fill_gradient2(low='darkred', mid='white', high = 'forestgreen')+
+  # scale_fill_viridis_c(option='H', direction = -1, na.value = NA, alpha = 0.8) + 
+  theme_minimal()
+
+#percentage changes
+ggplot() + 
+  geom_spatraster(data = floral_pct_change) + 
+  scale_fill_viridis_c(option='H', direction = -1, na.value = NA, alpha = 0.8) + 
+  theme_minimal()
+
+writeRaster(floral_pct_change, 'outputs/pct_change_high_emissions_floral_richness.tif', overwrite=T)
+
 # Fig 1F frequency plants
-#base layer to extend when plants are not in whole California
-r <-  rast("figures/plants_all_future_rich_raw.tif") %>% 
-  crop(ca, mask=T)
 
-wrld <- wrld_org %>% 
-  st_crop(extend(ext(r), 0.5))
+# Baseline and future richness patterns
+ssp245_plants <- csv_mods %>% 
+  filter(ssp=='ssp245', period == '2075-2100') %>% 
+  distinct(species, path) %>% 
+  left_join(
+    plants_bin_10th %>% map_dfr(\(x) tibble(species = x$species, cutoff = x$cutoff)), by='species'
+  )
 
-wrldp <- st_transform(wrld, crs=4269)
 
-curr <- rast('figures/plants_current_richness.tif') %>% resample(r[[1]])
+plan(multisession, workers=18)
+ssp_245_plants_bin_10th <- future_map(unique(ssp245_plants$species), \(x){
+  # x=ssp245_plants$species[1]
+  sp_db <- ssp245_plants %>% filter(species == x) 
+  
+  high_emissions_map <- (rast(sp_db$path) %>% mean()/1000) %>% crop(ca, mask=T)
+  
+  ca_high_emissions_bin <- high_emissions_map >= sp_db$cutoff[1]
+  wrap(ca_high_emissions_bin)
+})
 
-currM <- mask(curr, r[[1]])
-names(r)
+plan(sequential)
+
+ssps24_floral_richn <- map(ssp_245_plants_bin_10th, unwrap) %>% rast() %>% sum(na.rm = T) 
+
+plot(baseline_floral_rich)
+plot(ssps24_floral_richn)
+plot(ssp585_floral_richn)
 dats <- 
   tibble(
-    current = values(currM, na.rm=T)[,1] %>% unname(), 
-    # ssp245_2044 = values(r[[1]], na.rm=T)[,1] %>% unname(),
-    # ssp245_2074 = values(r[[2]], na.rm=T)[,1] %>% unname(),
-    ssp245_2100 = values(r[[7]], na.rm=T)[,1] %>% unname(),
-    
-    # ssp585_2044 = values(r[[7]], na.rm=T)[,1] %>% unname(),
-    # ssp585_2074 = values(r[[8]], na.rm=T)[,1] %>% unname(),
-    ssp585_2100 = values(r[[9]], na.rm=T)[,1] %>% unname()
+    baseline = values(baseline_floral_rich, na.rm=T)[,1] %>% unname(), 
+
+    ssp245_2100 = values(ssps24_floral_richn, na.rm=T)[,1] %>% unname(),
+
+    ssp585_2100 = values(ssp585_floral_richn, na.rm=T)[,1] %>% unname()
   ) %>% pivot_longer(
     cols = everything()
   ) %>% 
   mutate(Scenario = factor(name, 
                            levels= c(
-                             # 'ssp245_2044', 
-                             # 'ssp245_2074', 
                              'ssp585_2100',
                              'ssp245_2100',
-                             'current'
-                             # 'ssp585_2044', 
-                             # 'ssp585_2074', 
+                             'baseline'
                            )))
 
 ggplot(dats, aes(x = value, y = Scenario, fill = ..x..)) +
@@ -410,12 +514,15 @@ ggplot(dats, aes(x = value, y = Scenario, fill = ..x..)) +
   scale_fill_gradientn(
     colours = viridis_matte(256,option = 'D', desat_amount = 0.15, darken_amount = .1),
   ) +
-  # ylim(NA, 'current')+
   labs(x = 'Richness') +
-  theme_light(base_size = 14) +
-  scale_y_discrete(expand = c(0, 0)) +
-  theme(legend.position="none")
+  scale_y_discrete(labels = c('High emissions \n(2075-2100)',
+                              'Low emissions \n(2075-2100)',
+                              'Baseline'), expand = c(-1.1, 0)) +
+  theme_light(base_size = 18) +
+  theme(
+    legend.position="none"
+  )
 
-ggsave('figures/plant_density_suit_draft.png', dpi=600)  
-ggsave('figures/plant_density_suit_draft.svg', dpi=600)  
+ggsave('outputs/plant_density_suit_draft.png', dpi=600)  
+ggsave('outputs/plant_density_suit_draft.svg', dpi=600)  
 
