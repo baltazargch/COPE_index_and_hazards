@@ -4,6 +4,7 @@ library(terra)
 library(ncdf4)
 library(foreach)
 library(tidyverse)
+library(glue)
 library(doParallel)
 
 # prepare links and download LOCA2 files ----------------------------------
@@ -43,9 +44,12 @@ g_filtered <- g %>%
     path = glue('{base}{models}{suf1}{ssp}/{vars}/{vars}.{models}.{ssp}.{suf4}.{periods}{suf2}')
   )
 
+dir.create('outputs/monthly_climates/NAclim', recursive = T)
+
 g_filtered %>% pull(path) %>% 
   write_lines(., 'outputs/monthly_climates/NAclim/links_download.txt')
 
+# or open the terminal and run if permission denied
 system("bash download_parallel.sh")
 
 
