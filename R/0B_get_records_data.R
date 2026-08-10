@@ -68,9 +68,8 @@ osmia$dups <- duplicated(ext_osm$cell)
 osmia_sf <- st_as_sf(osmia, coords=c('lon', 'lat'))
 st_crs(osmia_sf) <- 4326
 
-osmia_thin <- thin_by_dist(osmia_sf, dist_min = km2m(5))
-
 osmia_df <- cbind(st_drop_geometry(osmia_sf), st_coordinates(osmia_sf))
+
 osmia_df %>% 
   filter(inland) %>% 
   select(
