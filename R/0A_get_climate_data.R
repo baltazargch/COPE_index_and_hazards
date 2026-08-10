@@ -103,7 +103,7 @@ table_cases <- expand_grid(models, vars, periods, ssp) %>%
 
 case_list <- table_cases %>% split(table_cases$case)
 # get files names and prepare output directories
-clim.files <- list.files('inputs/NAclim/', '.nc$', full.names=T) 
+clim.files <- list.files('outputs/monthly_climates/NAclim/', '.nc$', full.names=T) 
 
 
 # # get baseline time and models 
@@ -129,7 +129,7 @@ foreach(i = seq_along(case_list),
           
           # Get actual year range from raster time dimension
           year.range <- time(r) %>%
-            as_date(origin = "1950-01-01") %>%  # If time is in numeric days since 2000-01-01
+            as_date() %>% #origin = "1950-01-01") %>%  # If time is in numeric days since 2000-01-01
             year() %>%
             range()
           
@@ -158,8 +158,10 @@ foreach(i = seq_along(case_list),
           
           # Split model and month from layer names
           layer_names <- names(r)
-          month_names <- str_extract(layer_names, "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)")
-          model_names <- str_remove(layer_names, "_(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$")
+          month_names <- str_extract(layer_names,
+                                     "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)")
+          model_names <- str_remove(layer_names, 
+                                    "_(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$")
           
           # Check structure
           # table(model_names, month_names)
@@ -168,7 +170,8 @@ foreach(i = seq_along(case_list),
           # Apply to all models
           r.list <- split(r, model_names)
           r.monthly.by.model <- map(r.list, 
-                                    ~collapse_to_monthly_climatology(.x,  case$vars %>% unique()))
+                                    ~collapse_to_monthly_climatology(.x, 
+                                                                     case$vars %>% unique()))
           
           names(r.monthly.by.model) <- unique(model_names)
           r.monthly.by.model <- r.monthly.by.model %>% imap(\(x,n) {
