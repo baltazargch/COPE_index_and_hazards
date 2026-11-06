@@ -350,8 +350,10 @@ ens <- table_osmia_area %>%
     x = as.integer(scenario) + (as.integer(period) - 2) * 0.27
   )
 
+
 write_csv(pts, 'outputs/future_area_changes_olig.csv')
 write_csv(ens, 'outputs/ensemble_future_areas_means_olig.csv')
+
 
 p <- ggplot() +
   geom_hline(yintercept = 0, linetype = 2, colour = "grey50") +
