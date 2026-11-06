@@ -3,6 +3,7 @@ library(scales)
 library(terra)
 library(sf)
 library(rnaturalearth)
+library(scico)
 
 # -----------------------------
 # 1) Read TSS cutoffs
@@ -183,6 +184,7 @@ write_csv(
   "outputs/plants_projected_area_change_10p.csv"
 )
 
+areas_models <- read.csv("outputs/plants_projected_area_change_10p.csv")
 
 area_change_plot <- areas_models %>%
   filter(species != 'plagiobothrys_lithocaryus') %>% 
@@ -196,7 +198,137 @@ area_change_plot <- areas_models %>%
   summarise(area_change_pct = mean(area_change_pct)) %>% 
   ungroup()
 
+scen_lab <- c(ssp245 = "Low-emissions\n(SSP245)",
+              ssp370 = "Mid-emissions\n(SSP370)",
+              ssp585 = "High-emissions\n(SSP585)")
+per_lev  <- c("2015-2044", "2045-2074", "2075-2100")
+gcms     <- c("CNRM-ESM2-1", "EC-Earth3-Veg", "INM-CM5-0", "MIROC6")
 
+# species with no baseline area (NA / Inf change) cannot be plotted
+areas_models %>% filter(!is.finite(area_change_pct)) %>% distinct(species)
+
+# which combinations are repeated, how often, and for which species
+dups <- areas_models %>% count(species, gcm, ssp, period) %>% filter(n > 1)
+dups %>% count(copies = n)
+dups %>% distinct(species) %>% pull(species)
+
+# clean: exclude the endemic outlier, drop non-finite values, remove repeated rows
+areas_clean <- areas_models %>%
+  filter(species != "plagiobothrys_lithocaryus",
+         is.finite(area_change_pct)) %>%
+  distinct(species, gcm, ssp, period, .keep_all = TRUE)
+
+# checks
+n_distinct(areas_clean$species)                      
+areas_clean %>% count(ssp, period) %>% distinct(n)   # expect 260 (65 x 4) in every cell
+max(areas_clean$area_change_pct)                     # new maximum
+set.seed(1)
+
+pl <- areas_clean %>%
+  mutate(
+    ssp    = factor(ssp, levels = names(scen_lab)),
+    period = factor(period, levels = per_lev),
+    gcm    = factor(gcm, levels = gcms),
+    # scenario bin + period offset + model offset + small jitter for the species
+    x = as.integer(ssp) + (as.integer(period) - 2) * 0.30 +
+      (as.integer(gcm) - 2.5) * 0.055 + runif(n(), -0.02, 0.02)
+  )
+
+# median across all species x models in each scenario x period cell
+med <- pl %>%
+  group_by(ssp, period) %>%
+  summarise(med = median(area_change_pct), avg = mean(area_change_pct), .groups = "drop") %>%
+  mutate(x = as.integer(ssp) + (as.integer(period) - 2) * 0.30)
+
+p <- ggplot() +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = -10, ymax = 10,
+           fill = "grey90", alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = 2, colour = "grey40") +
+  geom_jitter(data = pl, colour = 'transparent',
+             aes(x, area_change_pct, fill = period, shape = gcm),
+             size = 2.2, alpha = 0.35) +
+  geom_boxplot(data = pl, 
+               aes(x, area_change_pct, fill = period, 
+                   group=interaction(period, ssp)),
+               outlier.size = 1.2,
+               size = 0.3, alpha = 0.65) +
+  geom_point(data = med,
+             aes(x = x, y = avg),
+             shape = 18, size=2.6, fill='black') +
+  scale_x_continuous(breaks = 1:3, labels = unname(scen_lab),
+                     expand = expansion(add = 0.5)) +
+  scale_y_continuous(transform = transform_pseudo_log(sigma = 100),
+                     breaks = c(-100, -50, -25, -10, 0, 10, 25, 50, 100, 250, 500)) +
+  scale_fill_scico_d(palette = "batlow", begin = 0.1, end = 0.75, name = "Period",
+                     labels = \(x) sub("-", "\u2013", x)) +
+  scale_shape_manual(values = c(21, 22, 23, 24), name = "Global climate model") +
+  guides(fill  = guide_legend(order = 1, override.aes = list(shape = 21, size = 3, alpha = 1)),
+         shape = guide_legend(order = 2, override.aes = list(fill = "grey70", size = 3, alpha = 1))
+  ) +
+  labs(x = NULL, y = "Change in suitable area (%)") +
+  theme_classic()+
+  theme(legend.position = "bottom", legend.box="vertical", legend.margin=margin())
+
+p
+
+ggsave("figures/fig3_plants_area_change_models.pdf", p,scale = 1.4,
+       width = 16, height = 14, units = "cm", dpi = 300)
+# species count behind the figure (expected: 300 / 4 = 75)
+n_distinct(pl$species)
+
+# what produces the extreme gains: baseline areas of the top gainers
+areas_models %>%
+  filter(is.finite(area_change_pct)) %>%
+  arrange(desc(area_change_pct)) %>%
+  select(species, gcm, ssp, period, current_area_km2, future_area_km2, area_change_pct) %>%
+  head(10)
+
+# projections above the axis maximum shown in the figure
+ymax <- 600   # set to your axis limit
+pl %>% filter(area_change_pct > ymax) %>% count(ssp, period)
+
+# --- 1. Pivot to wide format ---------------------------------------------
+# One row per species, columns = ssp x period combinations
+wide_tbl <- area_change_plot %>%
+  mutate(species = str_to_sentence(str_replace_all(species, "_", " "))) %>%
+  pivot_wider(
+    names_from  = c(ssp, period),
+    values_from = area_change_pct,
+    names_sep   = "_"
+  ) %>%
+  arrange(species)
+
+# --- 2. Reorder columns explicitly (ssp245, ssp370, ssp585 x 3 periods each) ---
+periods <- c("2015-2044", "2045-2074", "2075-2100")
+ssps    <- c("ssp245", "ssp370", "ssp585")
+ordered_cols <- as.vector(sapply(ssps, function(s) paste(s, periods, sep = "_")))
+
+wide_tbl <- wide_tbl %>%
+  select(species, all_of(ordered_cols))
+
+# --- 3. Rename columns for display (just periods; SSP shown via header group) ---
+display_names <- c("Species", rep(c("2015–2044", "2045–2074", "2075–2100"), times = 3))
+colnames(wide_tbl) <- display_names
+
+# --- 4. Build LaTeX table --------------------------------------------------
+latex_code <- wide_tbl %>%
+  kbl(
+    format    = "latex",
+    booktabs  = TRUE,
+    longtable = TRUE,
+    align     = c("l", rep("r", 9)),
+    digits    = 1,
+    caption   = "Projected percent change in habitat suitability area for each host-plant species across three SSP scenarios (SSP2-4.5, SSP3-7.0, SSP5-8.5) and three time periods.",
+    label     = "tab:area_change_species"
+  ) %>%
+  kable_styling(latex_options = c("repeat_header", "striped"), font_size = 8) %>%
+  add_header_above(c(" " = 1, "SSP2-4.5" = 3, "SSP3-7.0" = 3, "SSP5-8.5" = 3))
+
+# --- 5. Write to file so you can copy-paste straight into your .tex -------
+writeLines(latex_code, "plants_area_change_supp_table.tex")
+
+# Print to console too
+print(latex_code)
 
 period_summary <- area_change_plot %>% 
   group_by(period, ssp) %>% 
@@ -227,36 +359,94 @@ prep_counts <- function(df, col){
 }
 
 low_2100 <- areas_models %>%
-  filter(species != 'plagiobothrys_lithocaryus') %>% 
+  filter(species != 'plagiobothrys_lithocaryus') %>% #removed outlier
   filter(ssp == 'ssp245', period == '2075-2100') %>% 
   select(species, gcm, period, area_change_pct) %>% 
   prep_counts('area_change_pct')
 
 high_2100 <- areas_models %>%
-  filter(species != 'plagiobothrys_lithocaryus') %>% 
+  filter(species != 'plagiobothrys_lithocaryus') %>%  #removed outlier
   filter(ssp == 'ssp585', period == '2075-2100') %>% 
   select(species, gcm, period, area_change_pct) %>% 
   prep_counts('area_change_pct')
 
+d <- areas_models %>%  
+  filter(species != 'plagiobothrys_lithocaryus') %>%  #removed outlier
+  select(species, ssp, gcm, period, area_change_pct) %>% 
+  mutate(change_bin = cut(area_change_pct, breaks = bin_breaks,
+                          labels = bin_labels, ordered_result = TRUE)) %>%
+  mutate(change_bin = forcats::fct_expand(change_bin, bin_labels))
 
-rbind(low_2100 %>% mutate(Scenario = 'Low emissions', alpha='a') ,
-      high_2100 %>% mutate(Scenario = 'High emissions', alpha='b')) %>% 
-  mutate(Scenario = factor(Scenario, levels = c('Low emissions', 'High emissions'))) %>% 
-  filter(!is.na(Case)) %>% 
-  ggplot(aes(x = change_bin, y = n_species, fill = Case, alpha=Scenario)) +
-  geom_bar(position = "dodge", stat='identity', color='white') +
-  envalysis::theme_publish(base_size = 12) +
-  scale_fill_manual(values=c('#B2182B', '#E6C85C', '#4DAF4A'))+
-  guides(fill = "none")+
-  scale_alpha_manual(values=c(0.5, 0.95))+
-  labs(x = "% Change bin", y = "Number of species") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
-        legend.position = c(0.98, 0.98),      # top-right inside panel
+areas_models %>% count(species, ssp, gcm, period) %>% count(n)
+areas_models %>%
+  count(species, ssp, gcm, period, name = "n_rows") %>%
+  filter(n_rows > 1) %>%
+  distinct(species, n_rows)
+
+d %>% filter(is.na(change_bin)) %>%
+  summarise(n = n(), n_missing = sum(is.na(area_change_pct)),
+            lo = min(area_change_pct, na.rm = TRUE),
+            hi = max(area_change_pct, na.rm = TRUE))
+range(bin_breaks)
+
+sp <- d %>%
+  distinct(species, ssp, gcm, period, .keep_all = TRUE) %>%   # after confirming duplicates
+  filter(!is.na(area_change_pct)) %>%
+  group_by(species, ssp, period) %>%
+  summarise(med = median(area_change_pct),
+            lo  = min(area_change_pct),
+            hi  = max(area_change_pct), .groups = "drop")
+thr <- 10   # % treated as no meaningful change
+
+tally <- sp %>%
+  mutate(dir = case_when(med <= -thr ~ "loss",
+                         med >=  thr ~ "gain",
+                         TRUE        ~ "stable")) %>%
+  count(period, ssp, dir) %>%
+  tidyr::pivot_wider(names_from = dir, values_from = n, values_fill = 0) %>%
+  mutate(label = sprintf("%d loss · %d stable · %d gain", loss, stable, gain))
+tally <- tally %>%
+  left_join(sp %>% group_by(period, ssp) %>%
+              summarise(disagree = sum(lo < 0 & hi > 0), .groups = "drop"),
+            by = c("period", "ssp"))
+
+scen_lab <- c(ssp245 = "Low-emissions\n(SSP245)",
+              ssp370 = "Mid-emissions\n(SSP370)",
+              ssp585 = "High-emissions\n(SSP585)")
+lab <- tally %>% filter(period == '2075-2100') %>%
+  mutate(txt = paste0(scen_lab, "\n", label)) %>%
+  select(ssp, txt) %>% tibble::deframe()
+
+sp %>% 
+  filter(period == '2075-2100') %>% 
+  ggplot(aes(x = med, y = ssp, colour = med)) +
+  annotate('rect', xmin=-10, xmax=10, ymin=-Inf, ymax=Inf, 
+           fill='gray80',  linewidth = NA, inherit.aes = F,alpha = 0.35) +
+  geom_vline(xintercept = 0, linewidth = .3, colour = "grey40", linetype = 2) +
+  geom_linerange(aes(xmin = lo, xmax = hi),
+                 position = ggbeeswarm::position_quasirandom(orientation = "y", width = .3),
+                 alpha = .25, linewidth = .5) +
+  ggbeeswarm::geom_quasirandom(orientation = "y", size = 3, alpha = .7, width = .3) +
+  # facet_wrap(~ period, ncol = 1) +
+  scale_x_continuous(trans = scales::pseudo_log_trans(sigma = 10),
+                     breaks = c(-100, -50, -25, 0, 25, 50, 100, 200, 400)) +
+  scale_colour_gradientn(colours = scico(n = 15, direction = 1, palette = "oleron"), 
+                         rescaler = ~ scales::rescale_mid(.x, mid = 18)
+                         )+
+    
+    # values=scico(n=6, begin =0, end=1, alpha = 1, categorical = T,
+                                 # direction = -1, palette = 'tokyo')[c(6,1,5)])+
+  scale_y_discrete(labels = lab) +
+  labs(x = "Change in suitable area (%)", y = NULL) +
+  envalysis::theme_publish(base_size = 14) +
+  coord_flip()+
+  theme(
+        legend.position = 'none',      # top-right inside panel
         legend.justification = c(1, 1))
 
-ggsave(filename = 'figures/win_los.png', 
+ggsave(filename = 'figures/win_los2.pdf', 
        dpi=600,
-       width = 9, height = 8, scale=1.5, units = 'cm')
+       width = 13, height = 10, scale=1.6, units = 'cm')
 
 area_change_plot_clean <- area_change_plot %>% 
   filter(species != 'plagiobothrys_lithocaryus') %>% 
@@ -279,69 +469,137 @@ area_change_plot_clean <- area_change_plot %>%
     !is.na(area_change_pct)
   )
 
-ggplot(area_change_plot_clean, aes(x = period, y = area_change_pct)) +
-  geom_hline(
-    yintercept = 0,
-    linewidth = 0.4,
-    linetype = "dashed",
-    colour = "grey40"
-  ) +
-  geom_hline(
-    yintercept = c(-10, 10),
-    linewidth = 0.25,
-    linetype = "dotted",
-    colour = "grey60"
-  ) +
-  geom_violin(
-    aes(group = period),
-    width = 0.65,
-    fill = "grey90",
-    colour = "grey55",
-    linewidth = 0.3,
-    alpha = 0.45,
-    trim = FALSE
-  ) +
-  geom_jitter(
-    aes(shape = ssp, colour = change_class),
-    width = 0.12,
-    height = 0,
-    alpha = 0.65,
-    size = 1.9,
-    stroke = 0.6
-  ) +
-  stat_summary(
-    fun = median,
-    geom = "point",
-    shape = 95,
-    size = 8,
-    linewidth = 0.9,
-    colour = "black"
-  ) +
-  scale_y_continuous(
-    labels = label_percent(scale = 1)
-  ) +
-  scale_colour_manual(
-    values = c(
-      "Loss" = "#B2182B",
-      "No change" = "#E6C85C",
-      "Gain" = "#4DAF4A"
-    )
-  ) +
-  labs(
-    x = NULL,
-    y = "Change in suitable area relative to current (%)",
-    colour = NULL,
-    shape = "Scenario"
-  ) +
-  envalysis::theme_publish() +
-  theme(
-    legend.position = "bottom",
-    legend.box = "vertical"
-  )
+# --- 1. Overall percentages (across all species/ssp/period combos) --------
+overall_pct <- area_change_plot_clean %>%
+  count(change_class) %>%
+  mutate(pct = 100 * n / sum(n))
+
+overall_pct
+
+# --- 2. Percentages grouped by period --------------------------------------
+period_pct <- area_change_plot_clean %>%
+  count(period, change_class) %>%
+  group_by(period) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+period_pct |> group_by(change_class) |> mutate(mean_pct = mean(pct))
+
+# --- 3. (Optional) wide format for easy reporting in text/table -----------
+period_pct_wide <- period_pct %>%
+  select(period, change_class, pct) %>%
+  tidyr::pivot_wider(names_from = change_class, values_from = pct)
+
+period_pct_wide
+
+pal   <- scico(15, palette = "oleron")
+brks  <- c(-100, -50, -25, 0, 25, 50, 100, 200, 400)
+ylims <- range(c(sp$lo, sp$hi), na.rm = TRUE)   # shared across panels
+
+make_panel <- function(p, first = FALSE) {
+  
+  lab <- tally %>%
+    filter(period == p) %>%
+    mutate(txt = paste0(ssp, "\n", label)) %>%
+    select(ssp, txt) %>%
+    tibble::deframe()
+  
+  ggplot(filter(sp, period == p), aes(x = ssp, y = med, colour = med)) +
+    annotate("rect", xmin = -Inf, xmax = Inf, ymin = -10, ymax = 10,
+             fill = "grey80", colour = NA, alpha = .35) +
+    geom_hline(yintercept = 0, linewidth = .3, colour = "grey40", linetype = 2) +
+    geom_linerange(aes(ymin = lo, ymax = hi),
+                   position = ggbeeswarm::position_quasirandom(orientation = "x", width = .3),
+                   alpha = .25, linewidth = .4) +
+    ggbeeswarm::geom_quasirandom(orientation = "x", width = .3, size = 2.8, alpha = .7) +
+    scale_y_continuous(trans = scales::pseudo_log_trans(sigma = 10), breaks = brks) +
+    scale_x_discrete(labels = lab) +
+    scale_colour_gradientn(colours = pal,
+                           limits = c(-100, 100), oob = squish,
+                           rescaler = ~ rescale_mid(.x, mid = 0)) +
+    coord_cartesian(ylim = ylims) +
+    labs(x = NULL, title = p,
+         y = if (first) "Change in suitable area (%)" else NULL) +
+    envalysis::theme_publish(base_size = 12) +
+    theme(legend.position = "none",
+          plot.title   = element_text(face = "bold", size = rel(1)),
+          axis.text.y  = if (first) element_text() else element_blank(),
+          axis.ticks.y = if (first) element_line() else element_blank())
+}
+
+periods <- sort(unique(sp$period))
+panels  <- purrr::imap(periods, ~ make_panel(.x, first = TRUE))
+library(patchwork)
+
+fig_s <- wrap_plots(panels, nrow = 3) +
+  plot_annotation(tag_levels = "a", tag_prefix = "(", tag_suffix = ")")
+fig_s
 
 ggsave(filename = 'figures/whole_win_los.png', 
        dpi=600,
-       width = 9, height = 8, scale=1.5, units = 'cm')
+       width = 14, height = 18, scale=1.5, units = 'cm')
+
+# ggplot(area_change_plot_clean, aes(x = period, y = area_change_pct)) +
+#   geom_hline(
+#     yintercept = 0,
+#     linewidth = 0.4,
+#     linetype = "dashed",
+#     colour = "grey40"
+#   ) +
+#   geom_hline(
+#     yintercept = c(-10, 10),
+#     linewidth = 0.25,
+#     linetype = "dotted",
+#     colour = "grey60"
+#   ) +
+#   geom_violin(
+#     aes(group = period),
+#     width = 0.65,
+#     fill = "grey90",
+#     colour = "grey55",
+#     linewidth = 0.3,
+#     alpha = 0.45,
+#     trim = FALSE
+#   ) +
+#   geom_jitter(
+#     aes(shape = ssp, colour = change_class),
+#     width = 0.12,
+#     height = 0,
+#     alpha = 0.65,
+#     size = 1.9,
+#     stroke = 0.6
+#   ) +
+#   stat_summary(
+#     fun = median,
+#     geom = "point",
+#     shape = 95,
+#     size = 8,
+#     linewidth = 0.9,
+#     colour = "black"
+#   ) +
+#   scale_y_continuous(
+#     labels = label_percent(scale = 1)
+#   ) +
+#   scale_colour_manual(
+#     values = c(
+#       "Loss" = "#B2182B",
+#       "No change" = "#E6C85C",
+#       "Gain" = "#4DAF4A"
+#     )
+#   ) +
+#   labs(
+#     x = NULL,
+#     y = "Change in suitable area relative to current (%)",
+#     colour = NULL,
+#     shape = "Scenario"
+#   ) +
+#   envalysis::theme_publish() +
+#   theme(
+#     legend.position = "bottom",
+#     legend.box = "vertical"
+#   )
+
+
 
 evals <- read_csv("outputs/csv/plants_ensemble_eval.csv")
 

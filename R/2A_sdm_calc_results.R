@@ -7,6 +7,7 @@ library(tidyterra)
 library(tidyverse)
 library(patchwork)
 library(rnaturalearth)
+library(scico)
 
 # Osmia lignaria model results --------------------------------------------
 
@@ -64,7 +65,30 @@ NA_osmia <- ggplot() +
   geom_spatraster(data = base_osmia) + 
   scale_fill_viridis_c(option='H', na.value = NA, alpha = 0.8) + 
   theme_minimal()
-  
+
+sf_ol <- occs_osmia %>% 
+  filter(class != 'background') %>% 
+  st_as_sf(coords=c('lon', 'lat'))
+st_crs(sf_ol) <- 4326
+
+library(ggspatial)
+library(rnaturalearth)
+
+# world <- rnaturalearth::ne_countries(scale = 50)
+ggplot() + 
+  geom_spatraster(data = base_osmia) + 
+  geom_sf(data=sf_ol, colour='gray60',fill='gray10', size=0.8,shape=21, alpha=0.8 )+
+  scale_fill_viridis_c(option='H', direction = -1, na.value = NA, alpha = 0.8, 
+                       name = 'Suitability') + 
+  annotation_scale(style='ticks', location='br') + 
+  coord_sf(clip = T)+
+  # geom_sf(data=world, colour='gray60',fill=NA, linewidth=0.,alpha=0.8, )+
+  theme_minimal()+ 
+  theme(panel.background = element_rect(fill=NA, colour='gray80', linewidth=0.5 ))
+
+ggsave(filename = 'figures/F4_general_osmia.png', 
+       dpi = 600, width = 23,height = 16, units = 'cm', bg = NULL)
+
 CA_osmia <- ggplot() + 
   geom_spatraster(data = crop(base_osmia, ca, mask=T)) + 
   scale_fill_viridis_c(option='H', na.value = NA, alpha = 0.8) + 
@@ -84,14 +108,21 @@ writeRaster(rout, 'outputs/ca_baseline_osmia.tif', overwrite=TRUE)
 
 ssp585_osmia <- rast('outputs/models/projections/means/ssp585_2075-2100_EMmean.tif')
 
-ca_ssp585_osmia <- crop(ssp585_osmia, ca, mask=T)/1000
+ca_ssp585_osmia <- (crop(ssp585_osmia, ca, mask=T)/1000) %>% 
+  disagg(fact=8, method='bilinear') %>%
+  mask(ca) %>% resample(rout)
 
-pct_change <- (ca_ssp585_osmia - crop(base_osmia, ca, mask=T)) / crop(base_osmia, ca, mask=T) *100
+raw_change <- round(ca_ssp585_osmia - rout, 3)
 
-range(pct_change)
+pct_change <- raw_change / rout *100
 
-writeRaster(disagg(pct_change, fact=8, method='bilinear') %>% mask(ca), 
+
+
+writeRaster(pct_change %>% mask(ca), 
             'outputs/pct_change_high_emission_osmia.tif', overwrite=TRUE)
+
+writeRaster(raw_change %>% mask(ca), 
+            'outputs/raw_change_high_emission_osmia.tif', overwrite=TRUE)
 
 # Table 1. suitable areas for Osmia lignaria across scenarios
 # California area in km2
@@ -149,6 +180,69 @@ future_table <- map_dfr(seq_len(nlyr(fut_rast)), \(i) {
     suitable_area_km2 = calc_suitable_area(fut_rast[[i]], cutoff)
   )
 })
+
+# full models
+fut_rast_full <- rast(list.files(
+  "outputs/models/projections/",
+  pattern = "\\.tif$",
+  full.names = TRUE) %>% str_subset('TSSbinay', negate = T)
+  ) 
+
+names(fut_rast_full) <- sources(fut_rast_full) %>% 
+  basename() %>% 
+  str_remove("_EMmean\\.tif$") %>% 
+  str_remove("Osmia.lignaria_") 
+
+fut_rast_full <- fut_rast_full %>% crop(ca, mask=T)/1000
+
+future_table_full <- map_dfr(seq_len(nlyr(fut_rast_full)), \(i) {
+  
+  layer_name <- names(fut_rast_full)[i]
+  
+  tibble(
+    layer = layer_name,
+    suitable_area_km2 = calc_suitable_area(fut_rast_full[[i]], cutoff)
+  )
+})
+
+# full model results for area
+future_table_full <- future_table_full %>% 
+  mutate(
+    scenario = str_extract(layer, "ssp\\d+|SSP\\d+") %>% str_to_upper(),
+    period = case_when(
+      str_detect(layer, "2015|2044") ~ "2015--2044",
+      str_detect(layer, "2045|2074") ~ "2045--2074",
+      str_detect(layer, "2075|2100") ~ "2075--2100",
+      TRUE ~ NA_character_
+    ), 
+    model =str_remove(layer,'_.*')
+  ) %>% 
+  mutate(
+    period = factor(
+      period,
+      levels = c("2015--2044", "2045--2074", "2075--2100")
+    )
+  )
+
+# min / max across the individual models, per scenario x period
+range_by_model <- future_table_full %>%
+  mutate(period = as.character(period)) %>%      # reference table has period as character
+  group_by(scenario, period) %>%
+  summarise(
+    n_models          = n_distinct(model),
+    suitable_area_min = min(suitable_area_km2, na.rm = TRUE),
+    suitable_area_max = max(suitable_area_km2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # same formula as the reference table, applied to the model extremes
+    pct_change_min = 100 * (suitable_area_min - baseline_area) / baseline_area,
+    pct_change_max = 100 * (suitable_area_max - baseline_area) / baseline_area,
+    across(
+      c(suitable_area_min, suitable_area_max, pct_change_min, pct_change_max),
+      \(x) round(x, 1)
+    )
+  )
 
 # Parse scenario and period from layer names
 # Modify these regexes if your layer names are different
@@ -212,7 +306,77 @@ table_osmia_area <- bind_rows(
   ) %>% 
   arrange(scenario, period)
 
-table_osmia_area
+# reference table unchanged; the new columns are only appended
+table_osmia_area_range <- table_osmia_area %>%
+  left_join(
+    range_by_model %>% select(-n_models),
+    by = c("scenario", "period")
+  ) %>%
+  relocate(
+    suitable_area_min, suitable_area_max, pct_change_min, pct_change_max,
+    .after = pct_change_from_baseline          # keeps `layer` as the last column
+  )
+
+
+# table_osmia_area_range
+# table_osmia_area
+
+scen_lab <- c(SSP245 = "Low-emissions\n(SSP245)",
+              SSP370 = "Mid-emissions\n(SSP370)",
+              SSP585 = "High-emissions\n(SSP585)")
+per_lev  <- c("2015-2044", "2045-2074", "2075-2100")
+gcms     <- c("CNRM-ESM2-1", "EC-Earth3-Veg", "INM-CM5-0", "MIROC6")
+
+# one row per model x scenario x period, with fixed x positions:
+# scenario bin + period offset + small model offset (no random jitter)
+pts <- future_table_full %>%
+  mutate(period = str_replace(period, '--', '-')) %>% 
+  mutate(
+    model      = factor(str_extract(layer, str_c(gcms, collapse = "|")), levels = gcms),
+    scenario   = factor(scenario, levels = names(scen_lab)),
+    period     = factor(as.character(period), levels = per_lev),
+    pct_change = 100 * (suitable_area_km2 - baseline_area) / baseline_area,
+    x = as.integer(scenario) + (as.integer(period) - 2) * 0.27 +
+      (as.integer(model) - 2.5) * 0.045
+  )
+
+# ensemble-mean values from the reference table
+ens <- table_osmia_area %>%
+  mutate(period = str_replace(period, '--', '-')) %>% 
+  filter(scenario != "Baseline") %>%
+  mutate(
+    scenario = factor(scenario, levels = names(scen_lab)),
+    period   = factor(as.character(period), levels = per_lev),
+    x = as.integer(scenario) + (as.integer(period) - 2) * 0.27
+  )
+
+p <- ggplot() +
+  geom_hline(yintercept = 0, linetype = 2, colour = "grey50") +
+  geom_point(data = pts,
+             aes(x, pct_change, fill = period, shape = model),
+             size = 3.0, colour = NULL, stroke = 0.1) +
+  geom_segment(data = ens,
+               aes(x = x - 0.1, xend = x + 0.1, colour = period,
+                   y = pct_change_from_baseline, yend = pct_change_from_baseline),
+               linewidth = 1) +
+  scale_x_continuous(breaks = 1:3, labels = scen_lab,
+                     expand = expansion(add = 0.5)) +
+  scale_fill_scico_d(palette = "batlow", begin = 0.1, alpha = 0.8, end = 0.75, name = "Period") +
+  scale_colour_scico_d(palette = "batlow", begin = 0.1, alpha = 0.8, end = 0.75, name = "Period", guide=NULL) +
+  
+  scale_shape_manual(values = c(21, 22, 23, 24), name = "Global climate model") +
+  guides(fill  = guide_legend(order = 1, override.aes = list(shape = 21, size = 3)),
+         shape = guide_legend(order = 2, override.aes = list(fill = "grey70", size = 3))) +
+  labs(x = NULL, y = "Change in suitable area from baseline (%)") +
+  theme_classic() +
+  theme(legend.position = "inside",
+        legend.position.inside = c(0.15, 0.25) )
+
+p
+
+# fig. 2 osmia climate suitable area changes
+ggsave("figures/fig2_osmia_area_change_models.pdf", p,scale = 1.4,
+       width = 12, height = 11, units = "cm", dpi = 300)
 
 # Fig 1C. frequency plots
 
@@ -258,8 +422,7 @@ dats <-
 
 ggplot(dats, aes(x = value, y = Scenario, fill = after_stat(x))) +
   geom_density_ridges_gradient(scale = 1.2, linewidth = 0.1, rel_min_height = 0.005) +
-  scale_fill_gradientn(
-    colours = c('#d7191c','#fdae61', '#ffffbf', '#abdda4', '#2b83ba') ) +
+  scale_fill_gradientn(colours = scico(palette = 'nuuk',n = 20, direction = -1))+
   scale_x_continuous(
     breaks = seq(0, 1, by=.2)
   )+
@@ -272,8 +435,8 @@ ggplot(dats, aes(x = value, y = Scenario, fill = after_stat(x))) +
     legend.position="none"
   )
 
-ggsave('outputs/density_suit_draft.png', dpi=600)  
-ggsave('outputs/density_suit_draft.svg', dpi=600)  
+ggsave('outputs/density_suit_draft.png', height = 14.968, width = 12.205, dpi=600, units = 'cm')  
+ggsave('outputs/density_suit_draft.svg', height = 14.968, width = 12.205, dpi=600, units = 'cm')  
 
 # Floral resources model results ------------------------------------------
 
@@ -410,14 +573,20 @@ baseline_floral_rich <- plants_bin_10th %>% map(\(x) unwrap(x$ca_binary) %>% pro
 
 baseline_floral_rich <- baseline_floral_rich %>% rast() %>% sum(na.rm = T)
 
+
+baseline_floral_rich_resamp <- baseline_floral_rich %>% 
+  disagg(fact=8, method='near') %>%
+  mask(ca) %>% resample(rout)
 # simple representation Fig 1D
+
 ggplot() + 
-  geom_spatraster(data = baseline_floral_rich) + 
+  geom_spatraster(data = baseline_floral_rich_resamp) + 
   scale_fill_viridis_c(option='D', direction = -1, na.value = NA, alpha = 0.8) + 
   theme_minimal()
 
 #To plot in QGIS
 writeRaster(baseline_floral_rich, 'outputs/baseline_floral_richness.tif', overwrite=T)
+writeRaster(baseline_floral_rich_resamp, 'outputs/plant_richness_baseline_resamp.tif', overwrite=T)
 
 
 csv_mods %>% 
@@ -450,8 +619,21 @@ plan(sequential)
 
 ssp585_floral_richn <- map(ssp_585_plants_bin_10th, unwrap) %>% rast() %>% sum(na.rm = T) 
 
+ssp585_floral_richn_resamp <- ssp585_floral_richn %>% 
+  disagg(fact=8, method='near') %>%
+  mask(ca) %>% resample(rout, method = 'near')
+
+# simple representation Fig 1D
+ggplot() + 
+  geom_spatraster(data = ssp585_floral_richn_resamp - baseline_floral_rich_resamp) + 
+  scale_fill_viridis_c(option='D', direction = -1, na.value = NA, alpha = 0.8) + 
+  theme_minimal()
+
 #To plot in QGIS
 writeRaster(ssp585_floral_richn, 'outputs/2100_ssp585_floral_floral_richness.tif', overwrite=T)
+writeRaster(ssp585_floral_richn_resamp, 'outputs/2100_ssp585_floral_floral_richness_resamp.tif', overwrite=T)
+
+writeRaster(ssp585_floral_richn_resamp - baseline_floral_rich_resamp, 'outputs/plan_ssp585_richness_change_resamp.tif', overwrite=T)
 
 
 
@@ -521,9 +703,7 @@ dats <-
 ggplot(dats, aes(x = value, y = Scenario, fill = ..x..)) +
   geom_density_ridges_gradient(scale = 1, linewidth = 0.1,
                                rel_min_height = 0.005) +
-  scale_fill_gradientn(
-    colours = viridis_matte(256,option = 'D', desat_amount = 0.15, darken_amount = .1),
-  ) +
+  scale_fill_gradientn(colours = scico(palette = 'imola',n = 20, direction = -1))+
   labs(x = 'Richness') +
   scale_y_discrete(labels = c('High emissions \n(2075-2100)',
                               'Low emissions \n(2075-2100)',
@@ -533,6 +713,6 @@ ggplot(dats, aes(x = value, y = Scenario, fill = ..x..)) +
     legend.position="none"
   )
 
-ggsave('outputs/plant_density_suit_draft.png', dpi=600)  
-ggsave('outputs/plant_density_suit_draft.svg', dpi=600)  
+ggsave('outputs/plant_density_suit_draft.png', height = 14.968, width = 12.205, dpi=600, units = 'cm')  
+ggsave('outputs/plant_density_suit_draft.svg', height = 14.968, width = 12.205, dpi=600, units = 'cm')  
 
